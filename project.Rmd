@@ -1,0 +1,60 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Charles Floyd"
+date: "August 21, 2014"
+output: html_document
+---
+
+Predicting the Manner of Exercise
+
+The task is to build a model to predict how well exercises are performed based on data collected by accelerometers worn during the exercise. The first step was to download and read in the training data.
+```{r}
+library(caret)
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', 
+              method = 'curl', destfile = '/tmp/pml-training.csv')
+training.full <- read.csv('/tmp/pml-training.csv')
+```
+
+Even though this is the training set, it can be split it into training and test sets to compare different models' performance out of sample.
+```{r}
+set.seed(2004)
+intrain <- createDataPartition(training.full$classe, p = .7, list = F)
+training <- training.full[intrain,]
+testing <- training.full[-intrain,]
+nrow(training) ; nrow(testing)
+```
+
+Now to explore the data
+```{r}
+ncol(training)
+```
+There are lots of variables, but some may not be valuable to our model. Let's get rid of variables with variance close to zero.
+```{r}
+nzvdata <- nearZeroVar(training, saveMetrics = T)
+nzvdata.nonzv<- nzvdata[!nzvdata$nzv,]
+training <- training[, rownames(nzvdata.nonzv)]
+ncol(training)
+```
+Also, notice the first 5 variables are non-numeric.  Those can be excluded, as well.
+```{r}
+training <- training[,6:ncol(training)]
+ncol(training)
+```
+Of the remaining variables, some have na for more than 90% of their values.  Let's exclude them as well.
+```{r}
+napcts <- sapply(1:ncol(training), 
+         function(i) length(which(is.na(training[,i]))) / nrow(training))
+training <- training[,-which(napcts > 0.9, arr.ind = T)]
+ncol(training)
+```
+We've now removed the variables that could hinder our model.  Let's build a first model with trees
+```{r}
+model1.rpart <- train(classe ~ ., data = training, method = 'rpart')
+confusionMatrix(predict(model1.rpart, testing), testing$classe)
+```
+That doesn't seem great. Let's compare that to a model built using lda
+```{r}
+model2.lda <- train(classe ~ ., data = training, method = 'lda')
+confusionMatrix(predict(model2.lda, testing), testing$classe)
+```
+Much better prediction performance.  But perhaps it could still be better.  Are any of the variables highly correlated?
