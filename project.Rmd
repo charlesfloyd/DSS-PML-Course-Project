@@ -2,59 +2,94 @@
 title: "Practical Machine Learning Course Project"
 author: "Charles Floyd"
 date: "August 21, 2014"
-output: html_document
+output:
+  html_document:
+    keep_md: yes
 ---
 
 Predicting the Manner of Exercise
 
-The task is to build a model to predict how well exercises are performed based on data collected by accelerometers worn during the exercise. The first step was to download and read in the training data.
-```{r}
+The task is to build a model to predict how well exercises are performed based on data collected by activity monitors worn during the exercise. The first step was to download and read in the training data.
+```{r downloadfile, cache = T}
 library(caret)
 download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', 
               method = 'curl', destfile = '/tmp/pml-training.csv')
 training.full <- read.csv('/tmp/pml-training.csv')
 ```
-
-Even though this is the training set, it can be split it into training and test sets to compare different models' performance out of sample.
-```{r}
+Splitting the available data into test and training sets provides the opportunity to estimate a given model's out of sample error rate.
+```{r partitiondata, cache = T}
 set.seed(2004)
 intrain <- createDataPartition(training.full$classe, p = .7, list = F)
 training <- training.full[intrain,]
 testing <- training.full[-intrain,]
 nrow(training) ; nrow(testing)
-```
-
-Now to explore the data
-```{r}
 ncol(training)
 ```
-There are lots of variables, but some may not be valuable to our model. Let's get rid of variables with variance close to zero.
-```{r}
-nzvdata <- nearZeroVar(training, saveMetrics = T)
-nzvdata.nonzv<- nzvdata[!nzvdata$nzv,]
-training <- training[, rownames(nzvdata.nonzv)]
-ncol(training)
+The data has many covariates, but some may not be add value to a model. Showing a summary may provide clues as to which variables can be removed as predictors
+```{r showsummary, cache = T}
+summary(training)
 ```
-Also, notice the first 5 variables are non-numeric.  Those can be excluded, as well.
-```{r}
+The summary does reveal some columns that could be removed. The first 5 variables identify the user and the activity time, which don't seem relevant for modeling activity quality. They can be removed.
+```{r removeidvars, cache = T}
 training <- training[,6:ncol(training)]
+testing <- testing[,6:ncol(testing)]
 ncol(training)
 ```
-Of the remaining variables, some have na for more than 90% of their values.  Let's exclude them as well.
-```{r}
+Other variables have na for more than 90% of their values.  Those also seem to be candidates for removal.
+```{r removemostlyNA, cache = T}
 napcts <- sapply(1:ncol(training), 
          function(i) length(which(is.na(training[,i]))) / nrow(training))
 training <- training[,-which(napcts > 0.9, arr.ind = T)]
+testing <- testing[,-which(napcts > 0.9, arr.ind = T)]
 ncol(training)
 ```
-We've now removed the variables that could hinder our model.  Let's build a first model with trees
-```{r}
-model1.rpart <- train(classe ~ ., data = training, method = 'rpart')
-confusionMatrix(predict(model1.rpart, testing), testing$classe)
+After removing those variables, it's also worthwhile to see which of the remining variables have zero or close to zero variance.  They are also unlikely to add much to a model, and can be removed.
+```{r removezerovar, cache = T}
+nzvdata <- nearZeroVar(training, saveMetrics = T)
+nzvdata.nonzv<- nzvdata[!nzvdata$nzv,]
+training <- training[, rownames(nzvdata.nonzv)]
+testing <- testing[, rownames(nzvdata.nonzv)]
+ncol(training)
 ```
-That doesn't seem great. Let's compare that to a model built using lda
-```{r}
-model2.lda <- train(classe ~ ., data = training, method = 'lda')
-confusionMatrix(predict(model2.lda, testing), testing$classe)
+Having been restricted to numerical, varying variables, the data is now ready for model building.  The first attempt will use trees.
+```{r modelrpart, cache = T}
+system.time(model.rpart <- train(classe ~ ., data = training, method = 'rpart'))
+confusionMatrix(predict(model.rpart, testing), testing$classe)
 ```
-Much better prediction performance.  But perhaps it could still be better.  Are any of the variables highly correlated?
+The runtime was short, but the out of sample accuracy is very low, under 50%, and there was an entire class unrepresented in its predictions, class D.  Compare this model to a model using lda.
+```{r modellda, cache = T}
+system.time(model.lda <- train(classe ~ ., data = training, method = 'lda'))
+confusionMatrix(predict(model.lda, testing), testing$classe)
+```
+Faster and with better out of sample accuracy. If there are highly correlated variables, it's possible that preprocessing them with pca could yield better accuracy.
+```{r showcorrelmartrix, cache = T}
+M <- abs(cor(training[,-ncol(training)]))
+diag(M) <- 0
+which(M > 0.8, arr.ind = T)
+```
+There are such correlated variables, so next pca is used to create new covariates on which to train models with rpart and lda.
+```{r modelpca, cache = T}
+training.pp <- preProcess(training[,-ncol(training)], method = 'pca', thresh = 0.8)
+training.pc <- predict(training.pp, training[,-ncol(training)])
+system.time(model.rpart.pca <- train(training$classe ~ ., method = 'rpart', data = training.pc))
+system.time(model.lda.pca <- train(training$classe ~ ., method = 'lda', data = training.pc))
+testing.pc <- predict(training.pp, testing[,-ncol(training)])
+confusionMatrix(predict(model.rpart.pca, testing.pc), testing$classe)
+confusionMatrix(predict(model.lda.pca, testing.pc), testing$classe)
+```
+Using pca didn't improve the quality of the rpart and lda models.  Interestingly, using pca, the rpart model still left an entire class unaccounted for in its predictions, this time class C.  Having tried faster alternatives to this point, the next attempt will use random forest on a small subset of the data. This could demonstrate a lower bound on its accuracy and an idea of its runtime, both of which could help determine whether it's worthwhile for building the final model. To reduce the runtime as much as possible, a custom trainControl is passed to minimize iterations and repetitions for random forest.
+```{r minimodelrf, cache = T}
+minitrain <- training[createDataPartition(training$classe, p = .05, list = F),]
+system.time (model.rf.trial0 <- train(classe ~ ., data = minitrain, method = 'rf', trainControl = trainControl(method = 'cv', number = 1, repeats = 0)))
+confusionMatrix(predict(model.rf.trial0, testing), testing$classe)
+```
+On much less data, the model generated from rf had higher out of sample accuracy than the others, albeit in longer time. Before alotting the time for training on the entire set, a larger subset of the data will be used to determine if a combination of factors can yield a highly accurate model with rf in more reasonable time.
+```{r minimodelrf2, cache = T}
+minitrain <- training[createDataPartition(training$classe, p = .25, list = F),]
+system.time (model.rf.trial <- train(classe ~ ., data = minitrain, method = 'rf', trainControl = trainControl(method = 'cv', number = 1, repeats = 0)))
+confusionMatrix(predict(model.rf.trial, testing), testing$classe)
+```
+Out of sample accuracy of 98% and runtime of just under 30 minutes represent an appropriate compromise between speed and accuracy.  This will constitute the final model of exercise quality based on activity monitoring data.
+```{r showfinalmodel, cache = T}
+model.rf.trial$finalModel
+```
